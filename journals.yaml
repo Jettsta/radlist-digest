@@ -1,0 +1,18 @@
+# Your journal list.
+# To add a journal later: copy a block, change the name, pubmed_ta, and open_access flag.
+# `pubmed_ta` is the official PubMed "Title Abbreviation" — this is what makes the
+# query precise. If you add a journal and aren't sure of its abbreviation, search it
+# on https://www.ncbi.nlm.nih.gov/nlmcatalog and use the "Title Abbreviation" field.
+
+lookback_days: 366         # fetch a rolling year so the date-range buttons have data
+max_articles_per_journal: 400  # safety cap (a year of one journal); auto-summaries still capped below
+max_summaries_per_run: 60      # cap on Gemini calls per run to stay inside the free tier
+
+journals:
+  - name: "AJNR (American Journal of Neuroradiology)"
+    pubmed_ta: "AJNR Am J Neuroradiol"
+    open_access: false       # subscription — abstract summary + deep link to full text
+
+  - name: "Neurographics"
+    pubmed_ta: "Neurographics"
+    open_access: true        # open access — full-text summary + figure thumbnails when available
