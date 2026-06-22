@@ -36,7 +36,7 @@ import yaml
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 NCBI_KEY = os.environ.get("NCBI_API_KEY", "").strip()        # optional, raises rate limit
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()    # required for summaries
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "radlit@example.com").strip()
 
 HEADERS = {"User-Agent": f"RadLitDigest/1.0 (mailto:{CONTACT_EMAIL})"}
@@ -143,13 +143,32 @@ def fetch_metadata(pmids):
         if not iso_date:
             iso_date = f"{dt.date.today():%Y-%m-%d}"
 
+        # Publication types from PubMed → a friendly category.
+        ptypes = [ (pt.text or "").strip()
+                   for pt in art.findall(".//PublicationType") if pt.text ]
+        pl = [p.lower() for p in ptypes]
+        def has(*keys): return any(k in p for p in pl for k in keys)
+        if has("review"):
+            art_type = "Review"
+        elif has("case report"):
+            art_type = "Case report"
+        elif has("editorial", "comment", "letter"):
+            art_type = "Editorial/Letter"
+        elif has("clinical trial", "randomized", "observational", "comparative study",
+                 "evaluation study", "multicenter"):
+            art_type = "Primary research"
+        elif has("journal article"):
+            art_type = "Primary research"   # default for original articles
+        else:
+            art_type = "Other"
+
         link = f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
         articles.append({
             "pmid": pmid, "title": title, "abstract": abstract,
             "authors": author_str, "doi": doi, "pmc": pmc,
             "pubdate": pub, "iso_date": iso_date, "link": link,
-            "fulltext": "",
+            "art_type": art_type, "fulltext": "",
         })
     return articles
 
@@ -250,9 +269,10 @@ def gemini_summarize(title, body, is_fulltext):
 # ----------------------------------------------------------------------------
 # Step 5: build the HTML page
 # ----------------------------------------------------------------------------
-def render_html(sections, generated, videos=None, topics=None):
+def render_html(sections, generated, videos=None, topics=None, build_log=None):
     videos = videos or []
     topics = topics or []
+    build_log = build_log or []
     # Build a flat article list as JSON; the page filters it client-side.
     journals = []
     articles = []
@@ -267,6 +287,7 @@ def render_html(sections, generated, videos=None, topics=None):
                 "journal": sec["name"], "oa": sec["oa"],
                 "title": a["title"], "authors": a["authors"],
                 "pubdate": a["pubdate"], "iso": a["iso_date"],
+                "art_type": a.get("art_type", "Other"),
                 "summary": a["summary"], "link": a["link"],
                 "figures": a.get("figures", []),
                 "abstract": a.get("abstract", ""), "fulltext": ft,
@@ -319,6 +340,8 @@ def render_html(sections, generated, videos=None, topics=None):
     .count{color:var(--muted);font-size:.85rem;margin-bottom:14px}
     .badge{font-size:.7rem;font-weight:600;padding:2px 8px;border-radius:20px;margin-left:8px}
     .oa{background:#1f7a3f;color:#fff}.sub2{background:#7a5a1f;color:#fff}
+    .tbadge{font-size:.7rem;font-weight:600;padding:2px 8px;border-radius:20px;
+            margin-left:8px;background:#34507a;color:#fff}
     .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
           padding:18px 20px;margin:14px 0}
     .card h3{margin:0 0 6px;font-size:1.05rem;line-height:1.35}
@@ -332,6 +355,10 @@ def render_html(sections, generated, videos=None, topics=None):
          border:none;cursor:pointer}
     .btn.ghost{background:none;color:var(--accent);border:1px solid var(--accent)}
     .note{color:var(--muted);font-size:.8rem;margin-top:10px}
+    .pager{display:flex;align-items:center;justify-content:center;gap:16px;
+           margin:24px 0 8px}
+    .pager .btn[disabled]{opacity:.35;pointer-events:none}
+    .pageinfo{color:var(--muted);font-size:.85rem}
     .star{background:none;border:none;cursor:pointer;font-size:1.3rem;
           line-height:1;color:var(--muted);float:right;padding:0 0 0 10px}
     .star.on{color:#f5b301}
@@ -362,7 +389,22 @@ def render_html(sections, generated, videos=None, topics=None):
     js = """
     const DATA = __DATA__;
     let state = {mode:'articles', journal:'__ALL__', topic:'__ALL__',
-                 range:'365', from:null, to:null};
+                 range:'365', from:null, to:null, page:0};
+    const PAGE_SIZE = 10;
+
+    function pageControls(totalItems){
+      const pages = Math.ceil(totalItems / PAGE_SIZE);
+      if(pages <= 1) return '';
+      const cur = state.page + 1;
+      const prevDis = state.page<=0 ? 'disabled' : '';
+      const nextDis = state.page>=pages-1 ? 'disabled' : '';
+      return '<div class="pager">'+
+        '<button class="btn ghost" '+prevDis+' onclick="goPage('+(state.page-1)+')">&larr; Prev</button>'+
+        '<span class="pageinfo">Page '+cur+' of '+pages+'</span>'+
+        '<button class="btn ghost" '+nextDis+' onclick="goPage('+(state.page+1)+')">Next &rarr;</button>'+
+        '</div>';
+    }
+    function goPage(p){ state.page=p; refresh(); window.scrollTo(0,0); }
 
     /* ----- Favorites storage -------------------------------------------------
        Swappable module. Today it uses the browser's localStorage (per-device,
@@ -467,21 +509,26 @@ def render_html(sections, generated, videos=None, topics=None):
     }
 
     function renderList(){
-      const arts=filtered(); window.__cur=arts;
+      const all=filtered();
       const favView = state.journal==='__FAVS__';
       document.getElementById('controlsbar').style.display = favView?'none':'flex';
       document.getElementById('customwrap').style.display =
         (!favView && state.range==='custom')?'flex':'none';
       document.getElementById('count').textContent = favView
-        ? (arts.length+' starred item'+(arts.length===1?'':'s'))
-        : (arts.length+' article'+(arts.length===1?'':'s')+' in range');
+        ? (all.length+' starred item'+(all.length===1?'':'s'))
+        : (all.length+' article'+(all.length===1?'':'s')+' in range');
+      const pages=Math.max(1,Math.ceil(all.length/PAGE_SIZE));
+      if(state.page>pages-1) state.page=pages-1;
+      const arts=all.slice(state.page*PAGE_SIZE,(state.page+1)*PAGE_SIZE);
+      window.__cur=arts;
       let h='';
-      if(!arts.length) h='<p class="note">'+(favView
+      if(!all.length) h='<p class="note">'+(favView
         ? 'No favorites yet. Tap the &#9733; on any article to save it here.'
         : 'No articles in this range. Try a wider date range.')+'</p>';
       arts.forEach((a,i)=>{
         const badge=a.oa?'<span class="badge oa">open access</span>'
                         :'<span class="badge sub2">subscription</span>';
+        const tbadge = a.art_type ? '<span class="tbadge">'+esc(a.art_type)+'</span>' : '';
         const star='<button class="star'+(isFav(a.uid)?' on':'')+
                    '" title="Save to favorites" onclick="toggleFav('+
                    JSON.stringify(a.uid).replace(/"/g,'&quot;')+')">&#9733;</button>';
@@ -498,12 +545,13 @@ def render_html(sections, generated, videos=None, topics=None):
           '<p class="note">Subscription article — summary is abstract-based. '+
           'The button opens the article; sign in with your institutional access '+
           '(AJNR / ClinicalKey) for full text.</p>';
-        h+='<div class="card"><h3>'+star+esc(a.title)+badge+'</h3>'+
+        h+='<div class="card"><h3>'+star+esc(a.title)+badge+tbadge+'</h3>'+
            '<p class="meta">'+esc(a.authors)+' &middot; '+esc(a.pubdate)+'</p>'+
            '<div class="summary">'+esc(a.summary)+'</div>'+figs+
            '<div class="actions"><a class="btn" href="'+esc(a.link)+'" target="_blank">'+
            'Open full article &rarr;</a>'+detailBtn+'</div>'+accessNote+'</div>';
       });
+      h += pageControls(all.length);
       document.getElementById('list').innerHTML=h;
     }
 
@@ -552,7 +600,11 @@ def render_html(sections, generated, videos=None, topics=None):
         document.getElementById('list').innerHTML=h; return;
       }
       if(favView || state.topic!=='__ALL__'){
-        h=vids.map(videoCard).join('');
+        const pages=Math.max(1,Math.ceil(vids.length/PAGE_SIZE));
+        if(state.page>pages-1) state.page=pages-1;
+        const slice=vids.slice(state.page*PAGE_SIZE,(state.page+1)*PAGE_SIZE);
+        h=slice.map(videoCard).join('');
+        h+=pageControls(vids.length);
       } else {
         // group by topic, topic order from DATA.topics then any extras
         const order = DATA.topics.slice();
@@ -595,11 +647,11 @@ def render_html(sections, generated, videos=None, topics=None):
       if(state.mode==='articles'){ renderSidebar(); renderList(); }
       else { renderSidebarVideos(); renderVideos(); }
     }
-    function setMode(m){ state.mode=m; refresh(); }
-    function pick(j){state.journal=j;refresh();}
-    function pickTopic(t){state.topic=t;refresh();}
+    function setMode(m){ state.mode=m; state.page=0; refresh(); }
+    function pick(j){state.journal=j;state.page=0;refresh();}
+    function pickTopic(t){state.topic=t;state.page=0;refresh();}
     function setRange(r,el){
-      state.range=r;
+      state.range=r; state.page=0;
       document.querySelectorAll('.rbtn').forEach(b=>b.classList.remove('active'));
       if(el)el.classList.add('active');
       refresh();
@@ -607,6 +659,7 @@ def render_html(sections, generated, videos=None, topics=None):
     function setCustom(){
       state.from=document.getElementById('dfrom').value||null;
       state.to=document.getElementById('dto').value||null;
+      state.page=0;
       if(state.range==='custom') refresh();
     }
     window.addEventListener('DOMContentLoaded',()=>{
@@ -627,6 +680,8 @@ def render_html(sections, generated, videos=None, topics=None):
         f'onclick="setRange(\'{val}\',this)">{html.escape(lbl)}</button>'
         for val, lbl in range_buttons
     )
+
+    build_log_html = html.escape("\n".join(build_log)) if build_log else "(none)"
 
     page = f"""<!doctype html><html><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -651,7 +706,10 @@ def render_html(sections, generated, videos=None, topics=None):
     <div id='list'></div>
     <footer>Sources: PubMed &amp; PubMed Central, and the YouTube Data API
     (open/free APIs). Summaries and topic labels are AI-generated and may contain
-    errors — verify against the original before clinical use.</footer>
+    errors — verify against the original before clinical use.
+    <details style='margin-top:14px'><summary style='cursor:pointer'>Build diagnostics</summary>
+    <pre style='white-space:pre-wrap;font-size:.75rem;opacity:.8'>{build_log_html}</pre>
+    </details></footer>
   </main>
 </div>
 <script>{js.replace("__DATA__", data_json)}</script>
@@ -765,34 +823,42 @@ def gemini_classify_video(title, description, topics):
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             resp = json.loads(r.read())
-        txt = resp["candidates"][0]["content"]["parts"][0]["text"]
+        cand = (resp.get("candidates") or [{}])[0]
+        parts = (cand.get("content") or {}).get("parts") or [{}]
+        txt = parts[0].get("text", "")
+        if not txt:
+            print(f"  [classify] empty response for '{title[:40]}': {str(resp)[:200]}",
+                  file=sys.stderr)
+            return "Other", True
         txt = txt.replace("```json", "").replace("```", "").strip()
         obj = json.loads(txt)
         topic = (obj.get("topic") or "Other").strip()
         edu = bool(obj.get("educational", True))
         return (topic if edu else "Other"), edu
-    except Exception:
+    except Exception as e:
+        print(f"  [classify] failed for '{title[:40]}': {e}", file=sys.stderr)
         return "Other", True
 
 
-def gather_videos(vcfg):
+def gather_videos(vcfg, log=lambda m: None):
     lookback = vcfg.get("lookback_days", 366)
     cap = vcfg.get("max_videos_per_channel", 200)
     class_cap = vcfg.get("max_classifications_per_run", 80)
     topics = vcfg.get("topics", ["Other"])
     out = []
     classified = 0
+    topic_tally = {}
     if not YT_KEY:
-        print("No YOUTUBE_API_KEY set — skipping video section.", file=sys.stderr)
+        log("No YOUTUBE_API_KEY set — video section skipped.")
         return out, topics
     for ch in vcfg.get("channels", []):
         print(f"[YouTube: {ch.get('name', ch['handle'])}] resolving...", file=sys.stderr)
         uploads, title = yt_resolve_uploads_playlist(ch["handle"])
         if not uploads:
-            print("  could not resolve channel", file=sys.stderr)
+            log(f"YouTube: could not resolve channel @{ch['handle']} — check the handle.")
             continue
         vids = yt_list_videos(uploads, lookback, cap)
-        print(f"  {len(vids)} videos in window", file=sys.stderr)
+        log(f"YouTube @{ch['handle']}: {len(vids)} videos in window")
         for v in vids:
             if classified < class_cap:
                 topic, edu = gemini_classify_video(v["title"], v["description"], topics)
@@ -803,7 +869,13 @@ def gather_videos(vcfg):
             v["topic"] = topic
             v["educational"] = edu
             v["channel"] = v["channel"] or title
+            topic_tally[topic] = topic_tally.get(topic, 0) + 1
             out.append(v)
+    log(f"Video topics assigned: " +
+        ", ".join(f"{k}={v}" for k, v in sorted(topic_tally.items())))
+    if classified and topic_tally.get("Other", 0) == classified:
+        log("WARNING: every video was classified 'Other' — the Gemini classify "
+            "call is likely failing (check GEMINI_API_KEY / model name).")
     return out, topics
 
 
@@ -811,6 +883,11 @@ def gather_videos(vcfg):
 # Main
 # ----------------------------------------------------------------------------
 def main():
+    BUILD_LOG = []
+    def log(msg):
+        print(msg, file=sys.stderr)
+        BUILD_LOG.append(msg)
+
     with open("journals.yaml") as f:
         cfg = yaml.safe_load(f)
 
@@ -823,7 +900,7 @@ def main():
     for j in cfg["journals"]:
         print(f"[{j['name']}] searching...", file=sys.stderr)
         pmids = find_pmids(j["pubmed_ta"], lookback, cap)
-        print(f"  found {len(pmids)} articles", file=sys.stderr)
+        log(f"{j['name']}: {len(pmids)} articles found in PubMed")
         # efetch handles batches; chunk to be safe with large years
         meta = []
         for i in range(0, len(pmids), 100):
@@ -861,12 +938,12 @@ def main():
     try:
         with open("videos.yaml") as f:
             vcfg = yaml.safe_load(f)
-        videos, topics = gather_videos(vcfg)
+        videos, topics = gather_videos(vcfg, log)
     except FileNotFoundError:
-        print("No videos.yaml — skipping video section.", file=sys.stderr)
+        log("No videos.yaml — video section skipped.")
 
     generated = dt.datetime.now().strftime("%B %d, %Y")
-    html_out = render_html(sections, generated, videos, topics)
+    html_out = render_html(sections, generated, videos, topics, BUILD_LOG)
     with open("index.html", "w") as f:
         f.write(html_out)
     print("Wrote index.html", file=sys.stderr)
