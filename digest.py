@@ -177,9 +177,9 @@ def fetch_metadata(pmids):
 # Alternative source: publisher RSS feed (for journals PubMed doesn't index)
 # ----------------------------------------------------------------------------
 def fetch_rss_articles(rss_url, lookback_days, cap):
-    """Parse a publisher RSS/Atom feed into the same article shape we use elsewhere.
-    Returns a list of article dicts. Handles RSS 2.0 and Atom, with common
-    Dublin Core (dc:) and content: extensions."""
+    """Parse a publisher RSS/Atom/RDF feed into our article shape.
+    Handles RSS 2.0, Atom, and RSS 1.0 (RDF) with Dublin Core + PRISM
+    extensions (as used by IngentaConnect). Returns a list of article dicts."""
     try:
         raw = http_get(rss_url)
         root = ET.fromstring(raw)
@@ -187,14 +187,10 @@ def fetch_rss_articles(rss_url, lookback_days, cap):
         print(f"  RSS fetch/parse failed: {e}", file=sys.stderr)
         return []
 
-    # Strip namespaces so we can find elements regardless of prefix.
+    # Strip namespaces so element lookups are prefix-independent.
     for el in root.iter():
         if "}" in el.tag:
             el.tag = el.tag.split("}", 1)[1]
-
-    items = root.findall(".//item") or root.findall(".//entry")
-    cutoff = dt.date.today() - dt.timedelta(days=lookback_days)
-    articles = []
 
     def text(node, *names):
         for n in names:
@@ -203,49 +199,64 @@ def fetch_rss_articles(rss_url, lookback_days, cap):
                 return f.text.strip()
         return ""
 
+    def all_text(node, name):
+        return [ (e.text or "").strip() for e in node.findall(name) if (e.text or "").strip() ]
+
+    # Channel-level cover date (PRISM) is the issue's date; used when items
+    # lack their own date (common in Ingenta's per-issue feed).
+    channel = root.find(".//channel")
+    cover_date = ""
+    if channel is not None:
+        cover_date = text(channel, "coverDisplayDate", "date")
+    issue_iso = parse_feed_date(cover_date) or f"{dt.date.today():%Y-%m-%d}"
+
+    items = root.findall(".//item") or root.findall(".//entry")
+    cutoff = dt.date.today() - dt.timedelta(days=lookback_days)
+    articles = []
+
     for it in items[:cap]:
         title = text(it, "title") or "(untitled)"
 
-        # Link: RSS uses <link>text; Atom uses <link href="...">
         link = text(it, "link")
         if not link:
             la = it.find("link")
             if la is not None:
-                link = la.get("href", "")
+                link = la.get("href", "") or la.get("resource", "")
+        if not link:
+            # RDF items carry the URL in rdf:about (becomes 'about' attr after strip)
+            link = it.get("about", "")
 
-        # Description / abstract: try several common fields
+        # Abstract: feeds like Ingenta's don't include one; try common fields anyway.
         abstract = (text(it, "description", "summary", "abstract")
-                    or text(it, "encoded"))  # content:encoded -> 'encoded' after strip
-        # Strip any HTML tags from the abstract
+                    or text(it, "encoded"))
         abstract = re_strip_tags(abstract)
 
-        # Authors: dc:creator (becomes 'creator'), or <author>
-        authors = text(it, "creator", "author")
+        # Authors: multiple <dc:creator> -> 'creator' after namespace strip.
+        creators = all_text(it, "creator")
+        if not creators:
+            creators = all_text(it, "author")
+        authors = ", ".join(creators[:8]) + (" et al." if len(creators) > 8 else "")
 
-        # Date: pubDate / dc:date / published / updated
-        raw_date = text(it, "pubDate", "date", "published", "updated")
-        iso_date = parse_feed_date(raw_date)
-        if iso_date:
-            try:
-                if dt.date.fromisoformat(iso_date) < cutoff:
-                    continue
-            except ValueError:
-                pass
-        else:
-            iso_date = f"{dt.date.today():%Y-%m-%d}"
+        # Date: per-item date if present, else the issue cover date.
+        raw_date = text(it, "pubDate", "date", "published", "updated", "coverDisplayDate")
+        iso_date = parse_feed_date(raw_date) or issue_iso
 
-        # DOI sometimes present in guid or a dc:identifier
-        guid = text(it, "guid", "identifier", "id")
-        if not link and guid.startswith("http"):
-            link = guid
+        try:
+            if dt.date.fromisoformat(iso_date) < cutoff:
+                continue
+        except ValueError:
+            pass
+
+        # PRISM section (e.g. "Brain", "Head & Neck") makes a nice type-ish tag.
+        section = text(it, "section")
 
         articles.append({
             "pmid": "", "title": title, "abstract": abstract,
             "authors": authors, "doi": "", "pmc": "",
-            "pubdate": iso_date[:7] if iso_date else "",
-            "iso_date": iso_date or f"{dt.date.today():%Y-%m-%d}",
+            "pubdate": cover_date or iso_date[:7],
+            "iso_date": iso_date,
             "link": link or rss_url,
-            "art_type": "Other", "fulltext": "",
+            "art_type": section or "Other", "fulltext": "",
         })
     return articles
 
@@ -275,6 +286,12 @@ def parse_feed_date(s):
             return dt.date(tup[0], tup[1], tup[2]).isoformat()
     except Exception:
         pass
+    # PRISM coverDisplayDate: '1 October 2025' or 'October 2025'
+    for fmt in ("%d %B %Y", "%B %Y", "%d %b %Y", "%b %Y"):
+        try:
+            return dt.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
     return ""
 
 
@@ -1024,10 +1041,14 @@ def main():
                 if ft:
                     body, figs, is_full = ft, figures, True
                     a["fulltext"] = ft   # kept for the on-demand detailed-summary prompt
-            if not body:
-                body = a["title"]
 
-            if summaries_done < summary_cap:
+            has_text = bool((a["abstract"] or "").strip()) or is_full
+            if not has_text:
+                # No abstract available (common for publisher RSS feeds). Summarizing
+                # from the title alone is misleading, so skip the LLM and link out.
+                a["summary"] = ("No abstract is available from this source. "
+                                "Open the article to read it in full.")
+            elif summaries_done < summary_cap:
                 a["summary"] = gemini_summarize(a["title"], body, is_full)
                 summaries_done += 1
                 time.sleep(0.4)

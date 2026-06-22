@@ -15,5 +15,5 @@ journals:
 
   - name: "Neurographics"
     source: "rss"            # use the publisher RSS feed instead of PubMed
-    rss_url: "https://asnr.publisher.ingentaconnect.com/content/asnr/ng?format=rss"
+    rss_url: "https://asnr.publisher.ingentaconnect.com/content/asnr/ng/latest?format=rss"
     open_access: true        # full-text summary + figure thumbnails when available
