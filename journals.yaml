@@ -14,6 +14,6 @@ journals:
     open_access: false       # subscription — abstract summary + deep link to full text
 
   - name: "Neurographics"
-    source: "rss"            # use the publisher RSS feed instead of PubMed
-    rss_url: "https://asnr.publisher.ingentaconnect.com/content/asnr/ng/latest?format=rss"
-    open_access: true        # full-text summary + figure thumbnails when available
+    source: "crossref"      # query CrossRef by ISSN (RSS feed blocks automated access)
+    issn: "2637-8329"
+    open_access: true        # summary from abstract when CrossRef provides one

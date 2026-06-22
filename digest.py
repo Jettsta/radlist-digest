@@ -185,6 +185,75 @@ def fetch_metadata(pmids):
 # ----------------------------------------------------------------------------
 # Alternative source: publisher RSS feed (for journals PubMed doesn't index)
 # ----------------------------------------------------------------------------
+def fetch_crossref_articles(issn, lookback_days, cap):
+    """Fetch recent articles for a journal by ISSN from the free CrossRef API.
+    CrossRef is built for automated querying, so it won't block us like a
+    publisher site might. Returns articles in our standard shape."""
+    start = (dt.date.today() - dt.timedelta(days=lookback_days)).isoformat()
+    # Filter to items published since `start`, newest first.
+    params = urllib.parse.urlencode({
+        "filter": f"from-pub-date:{start}",
+        "sort": "published",
+        "order": "desc",
+        "rows": min(cap, 200),
+        "mailto": CONTACT_EMAIL,
+    })
+    url = f"https://api.crossref.org/journals/{issn}/works?{params}"
+    try:
+        data = json.loads(http_get(url))
+    except Exception as e:
+        print(f"  CrossRef fetch failed: {e}", file=sys.stderr)
+        return []
+
+    items = data.get("message", {}).get("items", [])
+    articles = []
+    for it in items:
+        title = " ".join(it.get("title") or []) or "(untitled)"
+
+        # Authors
+        auths = []
+        for a in it.get("author", []) or []:
+            fam = a.get("family", "")
+            giv = a.get("given", "")
+            if fam:
+                auths.append(f"{fam} {giv[:1]}." if giv else fam)
+        authors = ", ".join(auths[:8]) + (" et al." if len(auths) > 8 else "")
+
+        # Date: published-print / published-online / issued -> [Y, M, D]
+        dparts = None
+        for k in ("published-print", "published-online", "issued", "created"):
+            if it.get(k, {}).get("date-parts"):
+                dparts = it[k]["date-parts"][0]
+                break
+        if dparts:
+            y = dparts[0]
+            m = dparts[1] if len(dparts) > 1 else 1
+            d = dparts[2] if len(dparts) > 2 else 1
+            try:
+                iso_date = dt.date(y, m, d).isoformat()
+            except (ValueError, TypeError):
+                iso_date = f"{dt.date.today():%Y-%m-%d}"
+        else:
+            iso_date = f"{dt.date.today():%Y-%m-%d}"
+
+        # Abstract: CrossRef sometimes includes it as JATS-tagged text.
+        abstract = re_strip_tags(it.get("abstract", "") or "")
+
+        doi = it.get("DOI", "")
+        link = f"https://doi.org/{doi}" if doi else (it.get("URL", "") or "")
+
+        # Article type from CrossRef 'type' (journal-article, review-article, etc.)
+        cr_type = (it.get("type", "") or "").replace("-", " ").title()
+
+        articles.append({
+            "pmid": "", "title": title, "abstract": abstract,
+            "authors": authors, "doi": doi, "pmc": "",
+            "pubdate": iso_date[:7], "iso_date": iso_date,
+            "link": link, "art_type": cr_type or "Other", "fulltext": "",
+        })
+    return articles
+
+
 def fetch_rss_articles(rss_url, lookback_days, cap):
     """Parse a publisher RSS/Atom/RDF feed into our article shape.
     Handles RSS 2.0, Atom, and RSS 1.0 (RDF) with Dublin Core + PRISM
@@ -273,7 +342,10 @@ def fetch_rss_articles(rss_url, lookback_days, cap):
 def re_strip_tags(s):
     if not s:
         return ""
-    import re
+    import re, html as _html
+    # Decode entities first (CrossRef/JATS abstracts are often entity-encoded),
+    # then remove tags, then collapse whitespace.
+    s = _html.unescape(s)
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
@@ -1037,6 +1109,9 @@ def main():
         if j.get("source") == "rss" and j.get("rss_url"):
             meta = fetch_rss_articles(j["rss_url"], lookback, cap)
             log(f"{j['name']}: {len(meta)} articles found via RSS feed")
+        elif j.get("source") == "crossref" and j.get("issn"):
+            meta = fetch_crossref_articles(j["issn"], lookback, cap)
+            log(f"{j['name']}: {len(meta)} articles found via CrossRef")
         else:
             pmids = find_pmids(j["pubmed_ta"], lookback, cap)
             log(f"{j['name']}: {len(pmids)} articles found in PubMed")
