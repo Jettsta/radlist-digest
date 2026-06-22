@@ -26,6 +26,7 @@ import textwrap
 import datetime as dt
 import urllib.parse
 import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 
 import yaml
@@ -40,12 +41,20 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "radlit@example.com").strip()
 
 HEADERS = {"User-Agent": f"RadLitDigest/1.0 (mailto:{CONTACT_EMAIL})"}
+# Some publisher servers (e.g. IngentaConnect) reject non-browser User-Agents
+# with HTTP 403. For those fetches we send a browser-like UA instead.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
 
 
-def http_get(url, retries=3, backoff=2.0):
+def http_get(url, retries=3, backoff=2.0, headers=None):
+    hdrs = headers or HEADERS
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url, headers=HEADERS)
+            req = urllib.request.Request(url, headers=hdrs)
             with urllib.request.urlopen(req, timeout=60) as r:
                 return r.read()
         except Exception as e:
@@ -181,7 +190,7 @@ def fetch_rss_articles(rss_url, lookback_days, cap):
     Handles RSS 2.0, Atom, and RSS 1.0 (RDF) with Dublin Core + PRISM
     extensions (as used by IngentaConnect). Returns a list of article dicts."""
     try:
-        raw = http_get(rss_url)
+        raw = http_get(rss_url, headers=BROWSER_HEADERS)
         root = ET.fromstring(raw)
     except Exception as e:
         print(f"  RSS fetch/parse failed: {e}", file=sys.stderr)
@@ -340,6 +349,34 @@ def fetch_pmc_fulltext(pmc_id):
 # ----------------------------------------------------------------------------
 # Step 4: summarize with Gemini
 # ----------------------------------------------------------------------------
+def gemini_post(prompt, temperature=0.3, max_retries=5):
+    """POST a prompt to Gemini, retrying with backoff on 429 rate limits.
+    Returns the text response, or raises on non-recoverable errors."""
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}")
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature},
+    }).encode()
+    delay = 4.0
+    for attempt in range(max_retries):
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                resp = json.loads(r.read())
+            cand = (resp.get("candidates") or [{}])[0]
+            parts = (cand.get("content") or {}).get("parts") or [{}]
+            return parts[0].get("text", "")
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2          # exponential backoff: 4, 8, 16, 32s
+                continue
+            raise
+    return ""
+
+
 def gemini_summarize(title, body, is_fulltext):
     if not GEMINI_KEY:
         return "(No GEMINI_API_KEY set — summary skipped. Add your key to enable summaries.)"
@@ -368,22 +405,9 @@ def gemini_summarize(title, body, is_fulltext):
         {body[:120000]}
     """).strip()
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
-    )
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3},
-    }).encode()
-
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
-    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            resp = json.loads(r.read())
-        return resp["candidates"][0]["content"]["parts"][0]["text"].strip()
+        txt = gemini_post(prompt, temperature=0.3)
+        return txt.strip() if txt else "(Summary unavailable this run. The article link below still works.)"
     except Exception as e:
         return f"(Summary unavailable this run: {e}. The article link below still works.)"
 
@@ -934,23 +958,10 @@ def gemini_classify_video(title, description, topics):
         TITLE: {title}
         DESCRIPTION: {description[:1200]}
     """).strip()
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}")
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.0},
-    }).encode()
-    req = urllib.request.Request(url, data=payload,
-                                 headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            resp = json.loads(r.read())
-        cand = (resp.get("candidates") or [{}])[0]
-        parts = (cand.get("content") or {}).get("parts") or [{}]
-        txt = parts[0].get("text", "")
+        txt = gemini_post(prompt, temperature=0.0)
         if not txt:
-            print(f"  [classify] empty response for '{title[:40]}': {str(resp)[:200]}",
-                  file=sys.stderr)
+            print(f"  [classify] empty response for '{title[:40]}'", file=sys.stderr)
             return "Other", True
         txt = txt.replace("```json", "").replace("```", "").strip()
         obj = json.loads(txt)
@@ -985,7 +996,7 @@ def gather_videos(vcfg, log=lambda m: None):
             if classified < class_cap:
                 topic, edu = gemini_classify_video(v["title"], v["description"], topics)
                 classified += 1
-                time.sleep(0.3)
+                time.sleep(2.0)   # pace for free-tier per-minute limit
             else:
                 topic, edu = "Other", True
             v["topic"] = topic
