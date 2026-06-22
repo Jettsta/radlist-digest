@@ -8,7 +8,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -32,6 +32,16 @@ jobs:
           CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python digest.py
+
+      - name: Save video classification cache
+        run: |
+          if [ -f video_cache.json ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add video_cache.json
+            git commit -m "Update video classification cache [skip ci]" || echo "No cache changes to commit"
+            git push || echo "Nothing to push"
+          fi
 
       - name: Prepare site
         run: |
