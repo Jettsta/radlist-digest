@@ -582,6 +582,18 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     .star.on{color:#f5b301}
     .card h3{padding-right:4px}
     .modeswitch{display:flex;gap:6px;margin-bottom:16px}
+    .selbtns{display:flex;gap:6px;margin:10px 0 6px}
+    .selbtns button{flex:1;background:none;border:1px solid var(--line);color:var(--muted);
+          font-size:.75rem;padding:5px;border-radius:6px;cursor:pointer}
+    .selbtns button:hover{color:var(--ink);border-color:var(--accent)}
+    .checkrow{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;
+          cursor:pointer;font-size:.95rem}
+    .checkrow:hover{background:var(--line)}
+    .checkrow input{accent-color:var(--accent);width:16px;height:16px;cursor:pointer;flex:0 0 auto}
+    .checkrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .checkrow .ct{color:var(--muted);font-size:.8rem}
+    .jlabel{font-size:.72rem;font-weight:600;color:var(--accent);
+          text-transform:uppercase;letter-spacing:.03em;margin:0 0 4px}
     .modeswitch button{flex:1;background:var(--card);border:1px solid var(--line);
           color:var(--ink);padding:9px;border-radius:9px;cursor:pointer;font-weight:600}
     .modeswitch button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -606,9 +618,21 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     """
     js = """
     const DATA = __DATA__;
-    let state = {mode:'articles', journal:'__ALL__', topic:'__ALL__',
+    let state = {mode:'articles', favView:false,
+                 selJournals:null, selTopics:null,
                  range:'365', from:null, to:null, page:0};
     const PAGE_SIZE = 10;
+
+    // Initialize selection sets to "all checked" once DATA is known.
+    function initSelections(){
+      if(state.selJournals===null)
+        state.selJournals = new Set(DATA.journals.map(j=>j.name));
+      if(state.selTopics===null){
+        const ts = new Set(DATA.videos.map(v=>v.topic));
+        DATA.topics.forEach(t=>ts.add(t));
+        state.selTopics = ts;
+      }
+    }
 
     function pageControls(totalItems){
       const pages = Math.ceil(totalItems / PAGE_SIZE);
@@ -679,12 +703,12 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     }
 
     function filtered(){
-      if(state.journal==='__FAVS__'){
+      if(state.favView){
         return DATA.articles.filter(a=>isFav(a.uid))
           .sort((x,y)=> y.iso.localeCompare(x.iso));
       }
       return DATA.articles.filter(a=>{
-        if(state.journal!=='__ALL__' && a.journal!==state.journal) return false;
+        if(!state.selJournals.has(a.journal)) return false;
         return inRange(a.iso);
       }).sort((x,y)=> y.iso.localeCompare(x.iso));
     }
@@ -712,23 +736,37 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     function renderSidebar(){
       const counts={};
       DATA.articles.forEach(a=>{if(inRange(a.iso))counts[a.journal]=(counts[a.journal]||0)+1;});
-      const total=Object.values(counts).reduce((s,n)=>s+n,0);
       const favCount=Object.keys(favs).length;
-      let h='<button class="jbtn'+(state.journal==='__FAVS__'?' active':'')+
-            '" onclick="pick(\\'__FAVS__\\')">&#9733; Favorites<span class="ct">'+favCount+'</span></button>';
-      h+='<button class="jbtn'+(state.journal==='__ALL__'?' active':'')+
-            '" onclick="pick(\\'__ALL__\\')">All journals<span class="ct">'+total+'</span></button>';
+      let h='<button class="jbtn'+(state.favView?' active':'')+
+            '" onclick="toggleFavView()">&#9733; Favorites<span class="ct">'+favCount+'</span></button>';
+      h+='<div class="selbtns">'+
+         '<button onclick="selectAllJournals(true)">Select all</button>'+
+         '<button onclick="selectAllJournals(false)">Deselect all</button></div>';
       DATA.journals.forEach(j=>{
-        h+='<button class="jbtn'+(state.journal===j.name?' active':'')+
-           '" onclick="pick('+JSON.stringify(j.name).replace(/"/g,'&quot;')+')">'+
-           esc(j.name.split(' (')[0])+'<span class="ct">'+(counts[j.name]||0)+'</span></button>';
+        const checked = state.selJournals.has(j.name) ? 'checked' : '';
+        const jn = JSON.stringify(j.name).replace(/"/g,'&quot;');
+        h+='<label class="checkrow"><input type="checkbox" '+checked+
+           ' onchange="toggleJournal('+jn+')">'+
+           '<span class="nm">'+esc(j.name.split(' (')[0])+'</span>'+
+           '<span class="ct">'+(counts[j.name]||0)+'</span></label>';
       });
       document.getElementById('jlist').innerHTML=h;
     }
 
+    function toggleJournal(name){
+      if(state.selJournals.has(name)) state.selJournals.delete(name);
+      else state.selJournals.add(name);
+      state.favView=false; state.page=0; refresh();
+    }
+    function selectAllJournals(on){
+      state.selJournals = on ? new Set(DATA.journals.map(j=>j.name)) : new Set();
+      state.favView=false; state.page=0; refresh();
+    }
+    function toggleFavView(){ state.favView=!state.favView; state.page=0; refresh(); }
+
     function renderList(){
       const all=filtered();
-      const favView = state.journal==='__FAVS__';
+      const favView = state.favView;
       document.getElementById('controlsbar').style.display = favView?'none':'flex';
       document.getElementById('customwrap').style.display =
         (!favView && state.range==='custom')?'flex':'none';
@@ -742,7 +780,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       let h='';
       if(!all.length) h='<p class="note">'+(favView
         ? 'No favorites yet. Tap the &#9733; on any article to save it here.'
-        : 'No articles in this range. Try a wider date range.')+'</p>';
+        : 'No articles to show. Tick a journal in the sidebar, or widen the date range.')+'</p>';
       arts.forEach((a,i)=>{
         const badge=a.oa?'<span class="badge oa">open access</span>'
                         :'<span class="badge sub2">subscription</span>';
@@ -767,7 +805,8 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         const bodyText = (a.abstract && a.abstract.length>20)
           ? a.abstract
           : a.summary;
-        h+='<div class="card"><h3>'+star+esc(a.title)+badge+tbadge+'</h3>'+
+        const jlabel = '<p class="jlabel">'+esc((a.journal||'').split(' (')[0])+'</p>';
+        h+='<div class="card">'+jlabel+'<h3>'+star+esc(a.title)+badge+tbadge+'</h3>'+
            '<p class="meta">'+esc(a.authors)+' &middot; '+esc(a.pubdate)+'</p>'+
            '<div class="summary">'+esc(bodyText)+'</div>'+figs+
            '<div class="actions"><a class="btn" href="'+esc(a.link)+'" target="_blank">'+
@@ -782,13 +821,11 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
 
     function filteredVideos(){
       if(state.mode==='articles') return [];
-      let vids = DATA.videos.slice();
-      if(state.topic!=='__ALL__' && state.topic!=='__FAVS__')
-        vids = vids.filter(v=>v.topic===state.topic);
-      if(state.topic==='__FAVS__')
-        return vids.filter(v=>isFav(v.uid)).sort((a,b)=>b.iso.localeCompare(a.iso));
-      vids = vids.filter(v=>videoInRange(v.iso));
-      return vids.sort((a,b)=>b.iso.localeCompare(a.iso));
+      if(state.favView)
+        return DATA.videos.filter(v=>isFav(v.uid)).sort((a,b)=>b.iso.localeCompare(a.iso));
+      return DATA.videos
+        .filter(v=>state.selTopics.has(v.topic) && videoInRange(v.iso))
+        .sort((a,b)=>b.iso.localeCompare(a.iso));
     }
 
     function videoCard(v){
@@ -805,7 +842,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     }
 
     function renderVideos(){
-      const favView = state.topic==='__FAVS__';
+      const favView = state.favView;
       document.getElementById('controlsbar').style.display = favView?'none':'flex';
       document.getElementById('customwrap').style.display =
         (!favView && state.range==='custom')?'flex':'none';
@@ -817,18 +854,16 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       if(!vids.length){
         h='<p class="note">'+(favView
           ? 'No starred videos yet. Tap the &#9733; on any video to save it.'
-          : 'No videos in this range. Try a wider date range, or check that the '+
-            'YouTube key is set.')+'</p>';
+          : 'No videos to show. Tick a topic in the sidebar, or widen the date range.')+'</p>';
         document.getElementById('list').innerHTML=h; return;
       }
-      if(favView || state.topic!=='__ALL__'){
+      if(favView){
         const pages=Math.max(1,Math.ceil(vids.length/PAGE_SIZE));
         if(state.page>pages-1) state.page=pages-1;
         const slice=vids.slice(state.page*PAGE_SIZE,(state.page+1)*PAGE_SIZE);
-        h=slice.map(videoCard).join('');
-        h+=pageControls(vids.length);
+        h=slice.map(videoCard).join('')+pageControls(vids.length);
       } else {
-        // group by topic, topic order from DATA.topics then any extras
+        // group by topic; only checked topics are present in vids already
         const order = DATA.topics.slice();
         const groups={};
         vids.forEach(v=>{ (groups[v.topic]=groups[v.topic]||[]).push(v); });
@@ -846,21 +881,36 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       const favCount=Object.keys(favs).filter(k=>k.indexOf('vid_')===0).length;
       const counts={};
       DATA.videos.forEach(v=>{if(videoInRange(v.iso))counts[v.topic]=(counts[v.topic]||0)+1;});
-      const total=Object.values(counts).reduce((s,n)=>s+n,0);
-      let h='<button class="jbtn'+(state.topic==='__FAVS__'?' active':'')+
-            '" onclick="pickTopic(\\'__FAVS__\\')">&#9733; Favorites<span class="ct">'+
+      let h='<button class="jbtn'+(state.favView?' active':'')+
+            '" onclick="toggleFavView()">&#9733; Favorites<span class="ct">'+
             favCount+'</span></button>';
-      h+='<button class="jbtn'+(state.topic==='__ALL__'?' active':'')+
-            '" onclick="pickTopic(\\'__ALL__\\')">All topics<span class="ct">'+total+'</span></button>';
+      h+='<div class="selbtns">'+
+         '<button onclick="selectAllTopics(true)">Select all</button>'+
+         '<button onclick="selectAllTopics(false)">Deselect all</button></div>';
       const order=DATA.topics.slice();
       Object.keys(counts).forEach(t=>{if(order.indexOf(t)<0)order.push(t);});
       order.forEach(t=>{
         if(!counts[t]) return;
-        h+='<button class="jbtn'+(state.topic===t?' active':'')+
-           '" onclick="pickTopic('+JSON.stringify(t).replace(/"/g,'&quot;')+')">'+
-           esc(t)+'<span class="ct">'+counts[t]+'</span></button>';
+        const checked = state.selTopics.has(t) ? 'checked' : '';
+        const tn = JSON.stringify(t).replace(/"/g,'&quot;');
+        h+='<label class="checkrow"><input type="checkbox" '+checked+
+           ' onchange="toggleTopic('+tn+')">'+
+           '<span class="nm">'+esc(t)+'</span>'+
+           '<span class="ct">'+counts[t]+'</span></label>';
       });
       document.getElementById('jlist').innerHTML=h;
+    }
+
+    function toggleTopic(t){
+      if(state.selTopics.has(t)) state.selTopics.delete(t);
+      else state.selTopics.add(t);
+      state.favView=false; state.page=0; refresh();
+    }
+    function selectAllTopics(on){
+      const all=new Set(DATA.videos.map(v=>v.topic));
+      DATA.topics.forEach(t=>all.add(t));
+      state.selTopics = on ? all : new Set();
+      state.favView=false; state.page=0; refresh();
     }
 
     function refresh(){
@@ -870,8 +920,6 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       else { renderSidebarVideos(); renderVideos(); }
     }
     function setMode(m){ state.mode=m; state.page=0; refresh(); }
-    function pick(j){state.journal=j;state.page=0;refresh();}
-    function pickTopic(t){state.topic=t;state.page=0;refresh();}
     function setRange(r,el){
       state.range=r; state.page=0;
       document.querySelectorAll('.rbtn').forEach(b=>b.classList.remove('active'));
@@ -885,6 +933,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       if(state.range==='custom') refresh();
     }
     window.addEventListener('DOMContentLoaded',()=>{
+      initSelections();
       document.getElementById('dto').value=new Date().toISOString().slice(0,10);
       document.getElementById('dfrom').value=daysAgoISO(365);
       if(!DATA.videos || !DATA.videos.length)
@@ -1049,6 +1098,25 @@ def gemini_classify_video(title, description, topics):
         return "Other", True
 
 
+CACHE_FILE = "video_cache.json"
+
+
+def load_video_cache():
+    try:
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_video_cache(cache):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=0)
+    except Exception as e:
+        print(f"  cache save failed: {e}", file=sys.stderr)
+
+
 def gather_videos(vcfg, log=lambda m: None):
     lookback = vcfg.get("lookback_days", 366)
     cap = vcfg.get("max_videos_per_channel", 200)
@@ -1056,7 +1124,9 @@ def gather_videos(vcfg, log=lambda m: None):
     topics = vcfg.get("topics", ["Other"])
     out = []
     classified = 0
+    reused = 0
     topic_tally = {}
+    cache = load_video_cache()   # { videoId: {"topic":..., "educational":bool} }
     if not YT_KEY:
         log("No YOUTUBE_API_KEY set — video section skipped.")
         return out, topics
@@ -1069,9 +1139,19 @@ def gather_videos(vcfg, log=lambda m: None):
         vids = yt_list_videos(uploads, lookback, cap)
         log(f"YouTube @{ch['handle']}: {len(vids)} videos in window")
         for v in vids:
-            if classified < class_cap:
+            vid = v["vid"]
+            cached = cache.get(vid)
+            if cached and cached.get("topic"):
+                # Already classified in a previous run — reuse, no API call.
+                topic, edu = cached["topic"], cached.get("educational", True)
+                reused += 1
+            elif classified < class_cap:
                 topic, edu = gemini_classify_video(v["title"], v["description"], topics)
                 classified += 1
+                # Only cache successful (non-fallback) classifications, so a
+                # quota-failed "Other" is retried next run rather than stuck.
+                if topic != "Other" or edu is False:
+                    cache[vid] = {"topic": topic, "educational": edu}
                 time.sleep(2.0)   # pace for free-tier per-minute limit
             else:
                 topic, edu = "Other", True
@@ -1080,11 +1160,13 @@ def gather_videos(vcfg, log=lambda m: None):
             v["channel"] = v["channel"] or title
             topic_tally[topic] = topic_tally.get(topic, 0) + 1
             out.append(v)
+    save_video_cache(cache)
     log(f"Video topics assigned: " +
         ", ".join(f"{k}={v}" for k, v in sorted(topic_tally.items())))
-    if classified and topic_tally.get("Other", 0) == classified:
-        log("WARNING: every video was classified 'Other' — the Gemini classify "
-            "call is likely failing (check GEMINI_API_KEY / model name).")
+    log(f"Videos classified this run: {classified} new, {reused} reused from cache.")
+    if classified and reused == 0 and topic_tally.get("Other", 0) == classified:
+        log("WARNING: every newly classified video was 'Other' — the Gemini classify "
+            "call is likely failing (rate limit / key). Cached topics are still used.")
     return out, topics
 
 
