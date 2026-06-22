@@ -349,21 +349,21 @@ def fetch_pmc_fulltext(pmc_id):
 # ----------------------------------------------------------------------------
 # Step 4: summarize with Gemini
 # ----------------------------------------------------------------------------
-def gemini_post(prompt, temperature=0.3, max_retries=5):
-    """POST a prompt to Gemini, retrying with backoff on 429 rate limits.
-    Returns the text response, or raises on non-recoverable errors."""
+def gemini_post(prompt, temperature=0.3, max_retries=3):
+    """POST a prompt to Gemini, retrying briefly on 429 rate limits.
+    Fails fast (short, bounded backoff) so a run can never stall for long."""
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}")
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": temperature},
     }).encode()
-    delay = 4.0
+    delay = 3.0
     for attempt in range(max_retries):
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=60) as r:
                 resp = json.loads(r.read())
             cand = (resp.get("candidates") or [{}])[0]
             parts = (cand.get("content") or {}).get("parts") or [{}]
@@ -371,7 +371,7 @@ def gemini_post(prompt, temperature=0.3, max_retries=5):
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < max_retries - 1:
                 time.sleep(delay)
-                delay *= 2          # exponential backoff: 4, 8, 16, 32s
+                delay += 3.0       # bounded: 3s, 6s — at most ~9s total, then give up
                 continue
             raise
     return ""
@@ -623,7 +623,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     function copyPrompt(i){
       const a = window.__cur[i];
       let body = a.fulltext && a.fulltext.length>50 ? a.fulltext
-                 : (a.abstract || a.title);
+                 : (a.abstract || '');
       const label = a.fulltext && a.fulltext.length>50 ? 'full text' : 'abstract';
       const prompt =
         'Please give me a detailed summary of this neuroradiology article '+
@@ -633,7 +633,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       navigator.clipboard.writeText(prompt).then(()=>{
         const b=document.getElementById('cp'+i);
         b.textContent='Copied — paste into Claude';
-        setTimeout(()=>{b.textContent='Detailed summary (copy for Claude)';},2500);
+        setTimeout(()=>{b.textContent='Summarize (copy for Claude)';},2500);
       });
     }
 
@@ -684,16 +684,20 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
             '<a href="'+esc(f.url)+'" target="_blank" title="'+esc(f.caption)+'">'+
             '<img src="'+esc(f.url)+'" loading="lazy" alt="figure"></a>').join('')+'</div>';
         }
-        const detailBtn = a.oa ?
+        const hasText = (a.abstract && a.abstract.length>20) ||
+                        (a.fulltext && a.fulltext.length>50);
+        const detailBtn = hasText ?
           '<button class="btn ghost" id="cp'+i+'" onclick="copyPrompt('+i+')">'+
-          'Detailed summary (copy for Claude)</button>' : '';
+          'Summarize (copy for Claude)</button>' : '';
         const accessNote = a.oa ? '' :
-          '<p class="note">Subscription article — summary is abstract-based. '+
-          'The button opens the article; sign in with your institutional access '+
-          '(AJNR / ClinicalKey) for full text.</p>';
+          '<p class="note">Subscription article — open it and sign in with your '+
+          'institutional access (AJNR / ClinicalKey) for the full text.</p>';
+        const bodyText = (a.abstract && a.abstract.length>20)
+          ? a.abstract
+          : a.summary;
         h+='<div class="card"><h3>'+star+esc(a.title)+badge+tbadge+'</h3>'+
            '<p class="meta">'+esc(a.authors)+' &middot; '+esc(a.pubdate)+'</p>'+
-           '<div class="summary">'+esc(a.summary)+'</div>'+figs+
+           '<div class="summary">'+esc(bodyText)+'</div>'+figs+
            '<div class="actions"><a class="btn" href="'+esc(a.link)+'" target="_blank">'+
            'Open full article &rarr;</a>'+detailBtn+'</div>'+accessNote+'</div>';
       });
@@ -1026,9 +1030,7 @@ def main():
 
     lookback = cfg.get("lookback_days", 366)
     cap = cfg.get("max_articles_per_journal", 400)
-    summary_cap = cfg.get("max_summaries_per_run", 60)
     sections = []
-    summaries_done = 0
 
     for j in cfg["journals"]:
         print(f"[{j['name']}] searching...", file=sys.stderr)
@@ -1046,27 +1048,23 @@ def main():
 
         out_articles = []
         for a in meta:
-            body, figs, is_full = a["abstract"], [], False
+            figs, is_full = [], False
             if j["open_access"] and a["pmc"]:
                 ft, figures = fetch_pmc_fulltext(a["pmc"])
                 if ft:
-                    body, figs, is_full = ft, figures, True
+                    figs, is_full = figures, True
                     a["fulltext"] = ft   # kept for the on-demand detailed-summary prompt
 
             has_text = bool((a["abstract"] or "").strip()) or is_full
-            if not has_text:
-                # No abstract available (common for publisher RSS feeds). Summarizing
-                # from the title alone is misleading, so skip the LLM and link out.
+            # No automatic LLM summaries — keeps runs fast and inside the free tier.
+            # Each article gets a "Summarize" button (copy-prompt to Claude) instead.
+            if has_text:
+                a["summary"] = ("Tap \u201cSummarize\u201d to generate a summary on demand. "
+                                "The abstract is shown below; the button copies it "
+                                "(or the full text, when available) into a prompt for Claude.")
+            else:
                 a["summary"] = ("No abstract is available from this source. "
                                 "Open the article to read it in full.")
-            elif summaries_done < summary_cap:
-                a["summary"] = gemini_summarize(a["title"], body, is_full)
-                summaries_done += 1
-                time.sleep(0.4)
-            else:
-                a["summary"] = ("(Automatic summary skipped to stay within the free tier "
-                                "this run — open the article, or use the detailed-summary "
-                                "button to have Claude summarize it.)")
             a["figures"] = figs
             out_articles.append(a)
 
