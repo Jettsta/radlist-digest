@@ -174,6 +174,111 @@ def fetch_metadata(pmids):
 
 
 # ----------------------------------------------------------------------------
+# Alternative source: publisher RSS feed (for journals PubMed doesn't index)
+# ----------------------------------------------------------------------------
+def fetch_rss_articles(rss_url, lookback_days, cap):
+    """Parse a publisher RSS/Atom feed into the same article shape we use elsewhere.
+    Returns a list of article dicts. Handles RSS 2.0 and Atom, with common
+    Dublin Core (dc:) and content: extensions."""
+    try:
+        raw = http_get(rss_url)
+        root = ET.fromstring(raw)
+    except Exception as e:
+        print(f"  RSS fetch/parse failed: {e}", file=sys.stderr)
+        return []
+
+    # Strip namespaces so we can find elements regardless of prefix.
+    for el in root.iter():
+        if "}" in el.tag:
+            el.tag = el.tag.split("}", 1)[1]
+
+    items = root.findall(".//item") or root.findall(".//entry")
+    cutoff = dt.date.today() - dt.timedelta(days=lookback_days)
+    articles = []
+
+    def text(node, *names):
+        for n in names:
+            f = node.find(n)
+            if f is not None and (f.text or "").strip():
+                return f.text.strip()
+        return ""
+
+    for it in items[:cap]:
+        title = text(it, "title") or "(untitled)"
+
+        # Link: RSS uses <link>text; Atom uses <link href="...">
+        link = text(it, "link")
+        if not link:
+            la = it.find("link")
+            if la is not None:
+                link = la.get("href", "")
+
+        # Description / abstract: try several common fields
+        abstract = (text(it, "description", "summary", "abstract")
+                    or text(it, "encoded"))  # content:encoded -> 'encoded' after strip
+        # Strip any HTML tags from the abstract
+        abstract = re_strip_tags(abstract)
+
+        # Authors: dc:creator (becomes 'creator'), or <author>
+        authors = text(it, "creator", "author")
+
+        # Date: pubDate / dc:date / published / updated
+        raw_date = text(it, "pubDate", "date", "published", "updated")
+        iso_date = parse_feed_date(raw_date)
+        if iso_date:
+            try:
+                if dt.date.fromisoformat(iso_date) < cutoff:
+                    continue
+            except ValueError:
+                pass
+        else:
+            iso_date = f"{dt.date.today():%Y-%m-%d}"
+
+        # DOI sometimes present in guid or a dc:identifier
+        guid = text(it, "guid", "identifier", "id")
+        if not link and guid.startswith("http"):
+            link = guid
+
+        articles.append({
+            "pmid": "", "title": title, "abstract": abstract,
+            "authors": authors, "doi": "", "pmc": "",
+            "pubdate": iso_date[:7] if iso_date else "",
+            "iso_date": iso_date or f"{dt.date.today():%Y-%m-%d}",
+            "link": link or rss_url,
+            "art_type": "Other", "fulltext": "",
+        })
+    return articles
+
+
+def re_strip_tags(s):
+    if not s:
+        return ""
+    import re
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def parse_feed_date(s):
+    """Return YYYY-MM-DD from common feed date formats, or '' if unparseable."""
+    if not s:
+        return ""
+    s = s.strip()
+    # ISO 8601 (Atom): 2026-05-01T...   -> take the date part
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    # RFC 822 (RSS): 'Thu, 01 May 2026 00:00:00 GMT'
+    import email.utils
+    try:
+        tup = email.utils.parsedate_tz(s)
+        if tup:
+            return dt.date(tup[0], tup[1], tup[2]).isoformat()
+    except Exception:
+        pass
+    return ""
+
+
+# ----------------------------------------------------------------------------
 # Step 3: for open-access articles, pull full text + figures from PMC
 # ----------------------------------------------------------------------------
 def fetch_pmc_fulltext(pmc_id):
@@ -899,13 +1004,17 @@ def main():
 
     for j in cfg["journals"]:
         print(f"[{j['name']}] searching...", file=sys.stderr)
-        pmids = find_pmids(j["pubmed_ta"], lookback, cap)
-        log(f"{j['name']}: {len(pmids)} articles found in PubMed")
-        # efetch handles batches; chunk to be safe with large years
-        meta = []
-        for i in range(0, len(pmids), 100):
-            meta.extend(fetch_metadata(pmids[i:i+100]))
-            time.sleep(0.4)
+        if j.get("source") == "rss" and j.get("rss_url"):
+            meta = fetch_rss_articles(j["rss_url"], lookback, cap)
+            log(f"{j['name']}: {len(meta)} articles found via RSS feed")
+        else:
+            pmids = find_pmids(j["pubmed_ta"], lookback, cap)
+            log(f"{j['name']}: {len(pmids)} articles found in PubMed")
+            # efetch handles batches; chunk to be safe with large years
+            meta = []
+            for i in range(0, len(pmids), 100):
+                meta.extend(fetch_metadata(pmids[i:i+100]))
+                time.sleep(0.4)
 
         out_articles = []
         for a in meta:

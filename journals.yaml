@@ -14,5 +14,6 @@ journals:
     open_access: false       # subscription — abstract summary + deep link to full text
 
   - name: "Neurographics"
-    pubmed_ta: "Neurographics"
-    open_access: true        # open access — full-text summary + figure thumbnails when available
+    source: "rss"            # use the publisher RSS feed instead of PubMed
+    rss_url: "https://asnr.publisher.ingentaconnect.com/content/asnr/ng?format=rss"
+    open_access: true        # full-text summary + figure thumbnails when available
