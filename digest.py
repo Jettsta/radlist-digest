@@ -173,11 +173,15 @@ def fetch_metadata(pmids):
 
         link = f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
+        # MeSH headings (descriptor names) — used for neuro-filtering broad journals.
+        mesh = [ (m.text or "").strip().lower()
+                 for m in art.findall(".//MeshHeading/DescriptorName") if m.text ]
+
         articles.append({
             "pmid": pmid, "title": title, "abstract": abstract,
             "authors": author_str, "doi": doi, "pmc": pmc,
             "pubdate": pub, "iso_date": iso_date, "link": link,
-            "art_type": art_type, "fulltext": "",
+            "art_type": art_type, "mesh": mesh, "fulltext": "",
         })
     return articles
 
@@ -249,7 +253,7 @@ def fetch_crossref_articles(issn, lookback_days, cap):
             "pmid": "", "title": title, "abstract": abstract,
             "authors": authors, "doi": doi, "pmc": "",
             "pubdate": iso_date[:7], "iso_date": iso_date,
-            "link": link, "art_type": cr_type or "Other", "fulltext": "",
+            "link": link, "art_type": cr_type or "Other", "mesh": [], "fulltext": "",
         })
     return articles
 
@@ -334,7 +338,7 @@ def fetch_rss_articles(rss_url, lookback_days, cap):
             "pubdate": cover_date or iso_date[:7],
             "iso_date": iso_date,
             "link": link or rss_url,
-            "art_type": section or "Other", "fulltext": "",
+            "art_type": section or "Other", "mesh": [], "fulltext": "",
         })
     return articles
 
@@ -1171,6 +1175,46 @@ def gather_videos(vcfg, log=lambda m: None):
 
 
 # ----------------------------------------------------------------------------
+# Neuro filter — keep only neuroradiology articles from broad journals
+# ----------------------------------------------------------------------------
+NEURO_MESH = [
+    "brain", "cerebr", "cerebell", "spinal cord", "spine", "vertebr",
+    "nervous system", "neuro", "cranial", "skull", "meningeal", "meninges",
+    "glioma", "glioblastoma", "astrocytoma", "medulloblastoma", "ependymoma",
+    "intracranial", "subarachnoid", "head and neck", "temporal bone",
+    "orbit", "optic", "facial", "trigeminal", "pituitary", "sella",
+    "carotid", "stroke", "myelopathy", "demyelinating", "multiple sclerosis",
+    "epilepsy", "hydrocephalus", "peripheral nerve",
+]
+NEURO_KEYWORDS = [
+    "brain", "cerebral", "cerebellar", "cerebellum", "spine", "spinal",
+    "vertebral", "cervical", "thoracic", "lumbar", "neuro", "neurologic",
+    "intracranial", "cranial", "skull base", "head and neck", "temporal bone",
+    "orbit", "orbital", "optic", "facial", "sinus", "sinonasal", "nasopharyn",
+    "oropharyn", "larynx", "laryng", "thyroid", "parotid", "salivary",
+    "glioma", "glioblastoma", "astrocytoma", "meningioma", "schwannoma",
+    "medulloblastoma", "ependymoma", "pituitary", "sella", "carotid",
+    "stroke", "infarct", "aneurysm", "hemorrhage", "demyelinat",
+    "multiple sclerosis", "myelopathy", "epilepsy", "hydrocephalus",
+    "white matter", "plexus", "cranial nerve",
+]
+
+
+def is_neuro_article(a):
+    """True if an article looks like neuroradiology content (MeSH first, then
+    a title/abstract keyword backstop)."""
+    for m in a.get("mesh", []):
+        for term in NEURO_MESH:
+            if term in m:
+                return True
+    hay = (a.get("title", "") + " " + a.get("abstract", "")).lower()
+    for kw in NEURO_KEYWORDS:
+        if kw in hay:
+            return True
+    return False
+
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 def main():
@@ -1202,6 +1246,12 @@ def main():
             for i in range(0, len(pmids), 100):
                 meta.extend(fetch_metadata(pmids[i:i+100]))
                 time.sleep(0.4)
+
+        # Optional neuro-only filter for broad/general journals.
+        if j.get("filter") == "neuro":
+            before = len(meta)
+            meta = [a for a in meta if is_neuro_article(a)]
+            log(f"{j['name']}: neuro filter kept {len(meta)} of {before} articles")
 
         out_articles = []
         for a in meta:

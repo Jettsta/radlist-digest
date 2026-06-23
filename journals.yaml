@@ -17,3 +17,15 @@ journals:
     source: "crossref"      # query CrossRef by ISSN (RSS feed blocks automated access)
     issn: "2637-8329"
     open_access: true        # summary from abstract when CrossRef provides one
+
+  # Broad journals: filter: neuro keeps only neuroradiology articles
+  # (brain, spine, head & neck, face, etc.) and hides the rest.
+  - name: "RadioGraphics"
+    pubmed_ta: "Radiographics"
+    open_access: false
+    filter: "neuro"
+
+  - name: "Radiologic Clinics of North America"
+    pubmed_ta: "Radiol Clin North Am"
+    open_access: false
+    filter: "neuro"
