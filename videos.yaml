@@ -10,7 +10,7 @@
 
 lookback_days: 366
 max_videos_per_channel: 200
-max_classifications_per_run: 80   # cap on Gemini calls for video tagging (free-tier safety)
+max_classifications_per_run: 1   # TEMPORARY: testing with 1 video. Raise to ~5-80 once confirmed working.
 
 channels:
   - handle: "sureshmukherji359"   # https://www.youtube.com/@sureshmukherji359
