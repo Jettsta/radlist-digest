@@ -510,6 +510,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
                 "title": a["title"], "authors": a["authors"],
                 "pubdate": a["pubdate"], "iso": a["iso_date"],
                 "art_type": a.get("art_type", "Other"),
+                "type_group": normalize_type(a.get("art_type", "Other")),
                 "summary": a["summary"], "link": a["link"],
                 "figures": a.get("figures", []),
                 "abstract": a.get("abstract", ""), "fulltext": ft,
@@ -598,6 +599,11 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     .checkrow .ct{color:var(--muted);font-size:.8rem}
     .jlabel{font-size:.72rem;font-weight:600;color:var(--accent);
           text-transform:uppercase;letter-spacing:.03em;margin:0 0 4px}
+    .seclabel{font-size:.72rem;font-weight:700;color:var(--muted);
+          text-transform:uppercase;letter-spacing:.04em;margin:18px 0 4px}
+    .hidebtn{background:none;border:none;color:var(--muted);cursor:pointer;
+          font-size:.8rem;padding:0;margin-left:14px;text-decoration:underline}
+    .hidebtn:hover{color:var(--ink)}
     .modeswitch button{flex:1;background:var(--card);border:1px solid var(--line);
           color:var(--ink);padding:9px;border-radius:9px;cursor:pointer;font-weight:600}
     .modeswitch button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -622,10 +628,11 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     """
     js = """
     const DATA = __DATA__;
-    let state = {mode:'articles', favView:false,
-                 selJournals:null, selTopics:null,
+    let state = {mode:'articles', favView:false, hiddenView:false,
+                 selJournals:null, selTopics:null, selTypes:null,
                  range:'365', from:null, to:null, page:0};
     const PAGE_SIZE = 10;
+    const TYPE_BUCKETS = ['Review','Primary research','Case report','Editorial/Letter','Other'];
 
     // Initialize selection sets to "all checked" once DATA is known.
     function initSelections(){
@@ -636,6 +643,8 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         DATA.topics.forEach(t=>ts.add(t));
         state.selTopics = ts;
       }
+      if(state.selTypes===null)
+        state.selTypes = new Set(TYPE_BUCKETS);
     }
 
     function pageControls(totalItems){
@@ -665,20 +674,20 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       try { localStorage.setItem('__t','1'); localStorage.removeItem('__t'); hasLS = true; }
       catch(e){ hasLS = false; }
       return {
-        load(){
-          if(hasLS){ try { return JSON.parse(localStorage.getItem('radlit_favs')||'{}'); }
+        load(key){
+          if(hasLS){ try { return JSON.parse(localStorage.getItem(key)||'{}'); }
                      catch(e){ return {}; } }
-          return mem;
+          return mem[key]||{};
         },
-        save(obj){
-          if(hasLS){ try { localStorage.setItem('radlit_favs', JSON.stringify(obj)); }
+        save(key,obj){
+          if(hasLS){ try { localStorage.setItem(key, JSON.stringify(obj)); }
                      catch(e){} }
-          else { mem = obj; }
+          else { mem[key]=obj; }
         }
       };
     })();
 
-    let favs = Store.load();   // { uid: {title, link, journal/topic, type} }
+    let favs = Store.load('radlit_favs');   // { uid: {...} }
     function isFav(uid){ return !!favs[uid]; }
     function toggleFav(uid){
       const all = DATA.articles.concat(DATA.videos);
@@ -690,7 +699,20 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
                      channel:a.channel, type:'video'};
       else
         favs[uid] = {title:a.title, link:a.link, journal:a.journal, type:'article'};
-      Store.save(favs);
+      Store.save('radlit_favs', favs);
+      refresh();
+    }
+
+    let hidden = Store.load('radlit_hidden');   // { uid: {title, link, journal} }
+    function isHidden(uid){ return !!hidden[uid]; }
+    function toggleHidden(uid){
+      const all = DATA.articles.concat(DATA.videos);
+      const a = all.find(x=>x.uid===uid);
+      if(!a) return;
+      if(hidden[uid]) delete hidden[uid];
+      else hidden[uid] = {title:a.title, link:a.link,
+                          journal:a.journal||a.topic||''};
+      Store.save('radlit_hidden', hidden);
       refresh();
     }
 
@@ -707,12 +729,18 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     }
 
     function filtered(){
+      if(state.hiddenView){
+        return DATA.articles.filter(a=>isHidden(a.uid))
+          .sort((x,y)=> y.iso.localeCompare(x.iso));
+      }
       if(state.favView){
-        return DATA.articles.filter(a=>isFav(a.uid))
+        return DATA.articles.filter(a=>isFav(a.uid) && !isHidden(a.uid))
           .sort((x,y)=> y.iso.localeCompare(x.iso));
       }
       return DATA.articles.filter(a=>{
+        if(isHidden(a.uid)) return false;
         if(!state.selJournals.has(a.journal)) return false;
+        if(!state.selTypes.has(a.type_group||'Other')) return false;
         return inRange(a.iso);
       }).sort((x,y)=> y.iso.localeCompare(x.iso));
     }
@@ -741,8 +769,13 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       const counts={};
       DATA.articles.forEach(a=>{if(inRange(a.iso))counts[a.journal]=(counts[a.journal]||0)+1;});
       const favCount=Object.keys(favs).length;
+      const hidCount=Object.keys(hidden).filter(k=>k.indexOf('art_')===0).length;
       let h='<button class="jbtn'+(state.favView?' active':'')+
             '" onclick="toggleFavView()">&#9733; Favorites<span class="ct">'+favCount+'</span></button>';
+      h+='<button class="jbtn'+(state.hiddenView?' active':'')+
+            '" onclick="toggleHiddenView()">&#128065; Hidden<span class="ct">'+hidCount+'</span></button>';
+      // Journal checkboxes
+      h+='<div class="seclabel">Journals</div>';
       h+='<div class="selbtns">'+
          '<button onclick="selectAllJournals(true)">Select all</button>'+
          '<button onclick="selectAllJournals(false)">Deselect all</button></div>';
@@ -754,27 +787,55 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
            '<span class="nm">'+esc(j.name.split(' (')[0])+'</span>'+
            '<span class="ct">'+(counts[j.name]||0)+'</span></label>';
       });
+      // Type checkboxes
+      const tcounts={};
+      DATA.articles.forEach(a=>{if(inRange(a.iso)){const g=a.type_group||'Other';tcounts[g]=(tcounts[g]||0)+1;}});
+      h+='<div class="seclabel">Article type</div>';
+      h+='<div class="selbtns">'+
+         '<button onclick="selectAllTypes(true)">All</button>'+
+         '<button onclick="selectAllTypes(false)">None</button></div>';
+      TYPE_BUCKETS.forEach(t=>{
+        if(!tcounts[t]) return;
+        const checked = state.selTypes.has(t) ? 'checked' : '';
+        const tn = JSON.stringify(t).replace(/"/g,'&quot;');
+        h+='<label class="checkrow"><input type="checkbox" '+checked+
+           ' onchange="toggleType('+tn+')">'+
+           '<span class="nm">'+esc(t)+'</span>'+
+           '<span class="ct">'+tcounts[t]+'</span></label>';
+      });
       document.getElementById('jlist').innerHTML=h;
     }
 
     function toggleJournal(name){
       if(state.selJournals.has(name)) state.selJournals.delete(name);
       else state.selJournals.add(name);
-      state.favView=false; state.page=0; refresh();
+      state.favView=false; state.hiddenView=false; state.page=0; refresh();
     }
     function selectAllJournals(on){
       state.selJournals = on ? new Set(DATA.journals.map(j=>j.name)) : new Set();
-      state.favView=false; state.page=0; refresh();
+      state.favView=false; state.hiddenView=false; state.page=0; refresh();
     }
-    function toggleFavView(){ state.favView=!state.favView; state.page=0; refresh(); }
+    function toggleType(t){
+      if(state.selTypes.has(t)) state.selTypes.delete(t);
+      else state.selTypes.add(t);
+      state.favView=false; state.hiddenView=false; state.page=0; refresh();
+    }
+    function selectAllTypes(on){
+      state.selTypes = on ? new Set(TYPE_BUCKETS) : new Set();
+      state.favView=false; state.hiddenView=false; state.page=0; refresh();
+    }
+    function toggleFavView(){ state.favView=!state.favView; state.hiddenView=false; state.page=0; refresh(); }
+    function toggleHiddenView(){ state.hiddenView=!state.hiddenView; state.favView=false; state.page=0; refresh(); }
 
     function renderList(){
       const all=filtered();
-      const favView = state.favView;
-      document.getElementById('controlsbar').style.display = favView?'none':'flex';
+      const special = state.favView || state.hiddenView;
+      document.getElementById('controlsbar').style.display = special?'none':'flex';
       document.getElementById('customwrap').style.display =
-        (!favView && state.range==='custom')?'flex':'none';
-      document.getElementById('count').textContent = favView
+        (!special && state.range==='custom')?'flex':'none';
+      document.getElementById('count').textContent = state.hiddenView
+        ? (all.length+' hidden item'+(all.length===1?'':'s'))
+        : state.favView
         ? (all.length+' starred item'+(all.length===1?'':'s'))
         : (all.length+' article'+(all.length===1?'':'s')+' in range');
       const pages=Math.max(1,Math.ceil(all.length/PAGE_SIZE));
@@ -782,9 +843,11 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       const arts=all.slice(state.page*PAGE_SIZE,(state.page+1)*PAGE_SIZE);
       window.__cur=arts;
       let h='';
-      if(!all.length) h='<p class="note">'+(favView
+      if(!all.length) h='<p class="note">'+(state.hiddenView
+        ? 'Nothing hidden. Use “Hide” on an article to remove it from the list.'
+        : state.favView
         ? 'No favorites yet. Tap the &#9733; on any article to save it here.'
-        : 'No articles to show. Tick a journal in the sidebar, or widen the date range.')+'</p>';
+        : 'No articles to show. Tick a journal/type in the sidebar, or widen the date range.')+'</p>';
       arts.forEach((a,i)=>{
         const badge=a.oa?'<span class="badge oa">open access</span>'
                         :'<span class="badge sub2">subscription</span>';
@@ -809,12 +872,15 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         const bodyText = (a.abstract && a.abstract.length>20)
           ? a.abstract
           : a.summary;
+        const hideBtn = '<button class="hidebtn" onclick="toggleHidden('+
+          JSON.stringify(a.uid).replace(/"/g,'&quot;')+')">'+
+          (state.hiddenView?'Unhide':'Hide')+'</button>';
         const jlabel = '<p class="jlabel">'+esc((a.journal||'').split(' (')[0])+'</p>';
         h+='<div class="card">'+jlabel+'<h3>'+star+esc(a.title)+badge+tbadge+'</h3>'+
            '<p class="meta">'+esc(a.authors)+' &middot; '+esc(a.pubdate)+'</p>'+
            '<div class="summary">'+esc(bodyText)+'</div>'+figs+
            '<div class="actions"><a class="btn" href="'+esc(a.link)+'" target="_blank">'+
-           'Open full article &rarr;</a>'+detailBtn+'</div>'+accessNote+'</div>';
+           'Open full article &rarr;</a>'+detailBtn+hideBtn+'</div>'+accessNote+'</div>';
       });
       h += pageControls(all.length);
       document.getElementById('list').innerHTML=h;
@@ -1196,8 +1262,27 @@ NEURO_KEYWORDS = [
     "medulloblastoma", "ependymoma", "pituitary", "sella", "carotid",
     "stroke", "infarct", "aneurysm", "hemorrhage", "demyelinat",
     "multiple sclerosis", "myelopathy", "epilepsy", "hydrocephalus",
-    "white matter", "plexus", "cranial nerve",
+    "white matter",
+    # Specific neuro phrases kept; bare "nerve"/"plexus" removed because they
+    # also match MSK/body articles. Legit neuro cases with these still pass via
+    # their MeSH tags (NEURO_MESH) or the specific phrases below.
+    "cranial nerve", "brachial plexus", "lumbosacral plexus", "nerve root",
+    "optic nerve", "facial nerve", "trigeminal",
 ]
+
+
+def normalize_type(t):
+    """Fold PubMed and CrossRef type labels into canonical filter buckets."""
+    s = (t or "").lower()
+    if "review" in s:
+        return "Review"
+    if "case" in s:
+        return "Case report"
+    if "editorial" in s or "letter" in s or "comment" in s:
+        return "Editorial/Letter"
+    if "research" in s or "journal article" in s or "article" in s:
+        return "Primary research"
+    return "Other"
 
 
 def is_neuro_article(a):
@@ -1228,6 +1313,7 @@ def main():
 
     lookback = cfg.get("lookback_days", 366)
     cap = cfg.get("max_articles_per_journal", 400)
+    ezproxy = (cfg.get("ezproxy_prefix") or "").strip()
     sections = []
 
     for j in cfg["journals"]:
@@ -1273,6 +1359,9 @@ def main():
                 a["summary"] = ("No abstract is available from this source. "
                                 "Open the article to read it in full.")
             a["figures"] = figs
+            # Route subscription-journal links through EZproxy (open access untouched).
+            if ezproxy and not j["open_access"] and a.get("link"):
+                a["link"] = ezproxy + a["link"]
             out_articles.append(a)
 
         sections.append({

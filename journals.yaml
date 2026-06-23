@@ -8,6 +8,10 @@ lookback_days: 366         # fetch a rolling year so the date-range buttons have
 max_articles_per_journal: 400  # safety cap (a year of one journal); auto-summaries still capped below
 max_summaries_per_run: 60      # cap on Gemini calls per run to stay inside the free tier
 
+# Route subscription-journal links through your institutional EZproxy so you land
+# authenticated. Leave blank to disable. Open-access journals are never proxied.
+ezproxy_prefix: "https://login.ezpminer.urmc.rochester.edu/login?url="
+
 journals:
   - name: "AJNR (American Journal of Neuroradiology)"
     pubmed_ta: "AJNR Am J Neuroradiol"
@@ -29,3 +33,8 @@ journals:
     pubmed_ta: "Radiol Clin North Am"
     open_access: false
     filter: "neuro"
+
+  - name: "Neuroimaging Clinics of North America"
+    pubmed_ta: "Neuroimaging Clin N Am"
+    open_access: false
+    # all-neuro review series — no filter needed
