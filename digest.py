@@ -37,7 +37,7 @@ import yaml
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 NCBI_KEY = os.environ.get("NCBI_API_KEY", "").strip()        # optional, raises rate limit
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()    # required for summaries
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "radlit@example.com").strip()
 
 HEADERS = {"User-Agent": f"RadLitDigest/1.0 (mailto:{CONTACT_EMAIL})"}
@@ -1222,7 +1222,7 @@ def gather_videos(vcfg, log=lambda m: None):
                 # quota-failed "Other" is retried next run rather than stuck.
                 if topic != "Other" or edu is False:
                     cache[vid] = {"topic": topic, "educational": edu}
-                time.sleep(2.0)   # pace for free-tier per-minute limit
+                time.sleep(15)   # free tier = 5 req/min; ~15s keeps us safely under
             else:
                 topic, edu = "Other", True
             v["topic"] = topic
@@ -1359,8 +1359,9 @@ def main():
                 a["summary"] = ("No abstract is available from this source. "
                                 "Open the article to read it in full.")
             a["figures"] = figs
-            # Route subscription-journal links through EZproxy (open access untouched).
-            if ezproxy and not j["open_access"] and a.get("link"):
+            # Route links through EZproxy only for journals flagged ezproxy: true
+            # (the ones accessed via ClinicalKey). All others keep direct links.
+            if ezproxy and j.get("ezproxy") and a.get("link"):
                 a["link"] = ezproxy + a["link"]
             out_articles.append(a)
 
