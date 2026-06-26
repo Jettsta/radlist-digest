@@ -601,6 +601,18 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
           text-transform:uppercase;letter-spacing:.03em;margin:0 0 4px}
     .seclabel{font-size:.72rem;font-weight:700;color:var(--muted);
           text-transform:uppercase;letter-spacing:.04em;margin:18px 0 4px}
+    .newall{display:flex;gap:6px;margin-bottom:8px}
+    .newall .naBtn{flex:1;background:var(--card);border:1px solid var(--line);
+          color:var(--ink);padding:8px;border-radius:8px;cursor:pointer;font-weight:600;font-size:.9rem}
+    .newall .naBtn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .reviewbtn{width:100%;background:none;border:1px solid var(--line);color:var(--muted);
+          font-size:.8rem;padding:7px;border-radius:8px;cursor:pointer;margin-bottom:14px}
+    .reviewbtn:hover{color:var(--ink);border-color:var(--accent)}
+    .jrow{display:flex;align-items:center}
+    .jrow .checkrow{flex:1}
+    .jmark{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;
+          padding:4px 8px;border-radius:6px;flex:0 0 auto}
+    .jmark:hover{color:var(--accent);background:var(--line)}
     .hidebtn{background:none;border:none;color:var(--muted);cursor:pointer;
           font-size:.8rem;padding:0;margin-left:14px;text-decoration:underline}
     .hidebtn:hover{color:var(--ink)}
@@ -617,6 +629,10 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     .vcard .vmeta{color:var(--muted);font-size:.8rem;margin:0 0 8px}
     .vcard .vdesc{color:var(--muted);font-size:.85rem;
           display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .catlabel{font-size:.8rem;color:var(--muted);display:flex;align-items:center;gap:6px}
+    .catsel{background:var(--card);border:1px solid var(--line);color:var(--ink);
+          border-radius:6px;padding:4px 6px;font-size:.8rem;cursor:pointer}
+    .ovr{color:var(--accent);font-size:.85rem}
     @media(max-width:520px){.vcard{flex-direction:column}.vcard img{width:100%;flex:none;height:170px}}
     footer{color:var(--muted);font-size:.8rem;margin-top:50px}
     .menutoggle{display:none}
@@ -629,6 +645,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     js = """
     const DATA = __DATA__;
     let state = {mode:'articles', favView:false, hiddenView:false,
+                 showAll:false,  // false = New only (default), true = All articles
                  selJournals:null, selTopics:null, selTypes:null,
                  range:'365', from:null, to:null, page:0};
     const PAGE_SIZE = 10;
@@ -716,6 +733,47 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       refresh();
     }
 
+    // Reviewed timestamps: { __global__: "2026-06-23", "AJNR (...)": "2026-06-20", ... }
+    // An article is "new" if its iso date is AFTER the relevant reviewed timestamp
+    // (per-journal if set, else global). Marking reviewed stamps today's date.
+    let reviewed = Store.load('radlit_reviewed');
+    function reviewedCutoff(journal){
+      return reviewed[journal] || reviewed['__global__'] || '';
+    }
+    function isNew(a){
+      const cut = reviewedCutoff(a.journal);
+      if(!cut) return true;              // never reviewed -> everything is new
+      return a.iso > cut;
+    }
+    function markReviewed(journal){
+      const today = new Date().toISOString().slice(0,10);
+      if(journal) reviewed[journal] = today;
+      else {
+        // global: stamp global AND clear per-journal overrides so all reset together
+        reviewed = {'__global__': today};
+      }
+      Store.save('radlit_reviewed', reviewed);
+      refresh();
+    }
+    function newCount(journal){
+      return DATA.articles.filter(a =>
+        (!journal || a.journal===journal) && inRange(a.iso) &&
+        !isHidden(a.uid) && isNew(a)).length;
+    }
+
+    // Manual video category overrides: { videoId(uid): topic }. Applied over the
+    // auto-assigned topic everywhere. Per-device (localStorage) for now.
+    let vidOverrides = Store.load('radlit_vidcat');
+    function effectiveTopic(v){ return vidOverrides[v.uid] || v.topic; }
+    function setVideoTopic(uid, topic){
+      const v = DATA.videos.find(x=>x.uid===uid);
+      if(!v) return;
+      if(topic === v.topic) delete vidOverrides[uid];  // back to auto = clear override
+      else vidOverrides[uid] = topic;
+      Store.save('radlit_vidcat', vidOverrides);
+      refresh();
+    }
+
     function daysAgoISO(n){const d=new Date();d.setDate(d.getDate()-n);
       return d.toISOString().slice(0,10);}
 
@@ -741,6 +799,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         if(isHidden(a.uid)) return false;
         if(!state.selJournals.has(a.journal)) return false;
         if(!state.selTypes.has(a.type_group||'Other')) return false;
+        if(!state.showAll && !isNew(a)) return false;   // New-only by default
         return inRange(a.iso);
       }).sort((x,y)=> y.iso.localeCompare(x.iso));
     }
@@ -770,11 +829,17 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       DATA.articles.forEach(a=>{if(inRange(a.iso))counts[a.journal]=(counts[a.journal]||0)+1;});
       const favCount=Object.keys(favs).length;
       const hidCount=Object.keys(hidden).filter(k=>k.indexOf('art_')===0).length;
-      let h='<button class="jbtn'+(state.favView?' active':'')+
+      // New / All toggle + Mark all reviewed
+      let h='<div class="newall">'+
+            '<button class="naBtn'+(!state.showAll?' active':'')+'" onclick="setShowAll(false)">New ('+newCount(null)+')</button>'+
+            '<button class="naBtn'+(state.showAll?' active':'')+'" onclick="setShowAll(true)">All</button>'+
+            '</div>'+
+            '<button class="reviewbtn" onclick="markReviewed(null)">Mark all reviewed</button>';
+      h+='<button class="jbtn'+(state.favView?' active':'')+
             '" onclick="toggleFavView()">&#9733; Favorites<span class="ct">'+favCount+'</span></button>';
       h+='<button class="jbtn'+(state.hiddenView?' active':'')+
             '" onclick="toggleHiddenView()">&#128065; Hidden<span class="ct">'+hidCount+'</span></button>';
-      // Journal checkboxes
+      // Journal checkboxes (count shown = NEW count when in New mode, else total)
       h+='<div class="seclabel">Journals</div>';
       h+='<div class="selbtns">'+
          '<button onclick="selectAllJournals(true)">Select all</button>'+
@@ -782,10 +847,14 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       DATA.journals.forEach(j=>{
         const checked = state.selJournals.has(j.name) ? 'checked' : '';
         const jn = JSON.stringify(j.name).replace(/"/g,'&quot;');
-        h+='<label class="checkrow"><input type="checkbox" '+checked+
+        const shown = state.showAll ? (counts[j.name]||0) : newCount(j.name);
+        h+='<div class="jrow">'+
+           '<label class="checkrow"><input type="checkbox" '+checked+
            ' onchange="toggleJournal('+jn+')">'+
            '<span class="nm">'+esc(j.name.split(' (')[0])+'</span>'+
-           '<span class="ct">'+(counts[j.name]||0)+'</span></label>';
+           '<span class="ct">'+shown+'</span></label>'+
+           '<button class="jmark" title="Mark this journal reviewed" '+
+           'onclick="markReviewed('+jn+')">&#10003;</button></div>';
       });
       // Type checkboxes
       const tcounts={};
@@ -826,6 +895,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     }
     function toggleFavView(){ state.favView=!state.favView; state.hiddenView=false; state.page=0; refresh(); }
     function toggleHiddenView(){ state.hiddenView=!state.hiddenView; state.favView=false; state.page=0; refresh(); }
+    function setShowAll(on){ state.showAll=on; state.favView=false; state.hiddenView=false; state.page=0; refresh(); }
 
     function renderList(){
       const all=filtered();
@@ -837,7 +907,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         ? (all.length+' hidden item'+(all.length===1?'':'s'))
         : state.favView
         ? (all.length+' starred item'+(all.length===1?'':'s'))
-        : (all.length+' article'+(all.length===1?'':'s')+' in range');
+        : (all.length+(state.showAll?' article':' new article')+(all.length===1?'':'s')+' in range');
       const pages=Math.max(1,Math.ceil(all.length/PAGE_SIZE));
       if(state.page>pages-1) state.page=pages-1;
       const arts=all.slice(state.page*PAGE_SIZE,(state.page+1)*PAGE_SIZE);
@@ -847,6 +917,8 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         ? 'Nothing hidden. Use “Hide” on an article to remove it from the list.'
         : state.favView
         ? 'No favorites yet. Tap the &#9733; on any article to save it here.'
+        : !state.showAll
+        ? 'No new articles. Switch to “All” to see everything, or widen the date range.'
         : 'No articles to show. Tick a journal/type in the sidebar, or widen the date range.')+'</p>';
       arts.forEach((a,i)=>{
         const badge=a.oa?'<span class="badge oa">open access</span>'
@@ -894,7 +966,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       if(state.favView)
         return DATA.videos.filter(v=>isFav(v.uid)).sort((a,b)=>b.iso.localeCompare(a.iso));
       return DATA.videos
-        .filter(v=>state.selTopics.has(v.topic) && videoInRange(v.iso))
+        .filter(v=>state.selTopics.has(effectiveTopic(v)) && videoInRange(v.iso))
         .sort((a,b)=>b.iso.localeCompare(a.iso));
     }
 
@@ -903,12 +975,22 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
                  '" title="Save to favorites" onclick="toggleFav('+
                  JSON.stringify(v.uid).replace(/"/g,'&quot;')+')">&#9733;</button>';
       const thumb = v.thumb ? '<img src="'+esc(v.thumb)+'" loading="lazy" alt="">' : '';
+      const cur = effectiveTopic(v);
+      const overridden = !!vidOverrides[v.uid];
+      // Build the category dropdown from the topic list (plus any extra topics present)
+      const opts = DATA.topics.slice();
+      DATA.videos.forEach(x=>{const t=effectiveTopic(x); if(opts.indexOf(t)<0)opts.push(t);});
+      if(opts.indexOf(cur)<0) opts.push(cur);
+      const uidj = JSON.stringify(v.uid).replace(/"/g,'&quot;');
+      const sel = '<select class="catsel" onchange="setVideoTopic('+uidj+',this.value)">'+
+        opts.map(t=>'<option'+(t===cur?' selected':'')+'>'+esc(t)+'</option>').join('')+
+        '</select>'+(overridden?'<span class="ovr" title="manually set">&#9998;</span>':'');
       return '<div class="vcard">'+thumb+'<div class="vbody"><h4>'+star+esc(v.title)+'</h4>'+
-        '<p class="vmeta">'+esc(v.channel)+' &middot; '+esc(v.iso)+
-        ' &middot; '+esc(v.topic)+'</p>'+
+        '<p class="vmeta">'+esc(v.channel)+' &middot; '+esc(v.iso)+'</p>'+
         '<p class="vdesc">'+esc(v.description)+'</p>'+
         '<div class="actions"><a class="btn" href="'+esc(v.link)+'" target="_blank">'+
-        'Watch on YouTube &rarr;</a></div></div></div>';
+        'Watch on YouTube &rarr;</a>'+
+        '<label class="catlabel">Topic: '+sel+'</label></div></div></div>';
     }
 
     function renderVideos(){
@@ -936,7 +1018,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
         // group by topic; only checked topics are present in vids already
         const order = DATA.topics.slice();
         const groups={};
-        vids.forEach(v=>{ (groups[v.topic]=groups[v.topic]||[]).push(v); });
+        vids.forEach(v=>{ const t=effectiveTopic(v); (groups[t]=groups[t]||[]).push(v); });
         Object.keys(groups).forEach(t=>{ if(order.indexOf(t)<0) order.push(t); });
         order.forEach(t=>{
           if(!groups[t]) return;
@@ -950,7 +1032,7 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
     function renderSidebarVideos(){
       const favCount=Object.keys(favs).filter(k=>k.indexOf('vid_')===0).length;
       const counts={};
-      DATA.videos.forEach(v=>{if(videoInRange(v.iso))counts[v.topic]=(counts[v.topic]||0)+1;});
+      DATA.videos.forEach(v=>{if(videoInRange(v.iso)){const t=effectiveTopic(v);counts[t]=(counts[t]||0)+1;}});
       let h='<button class="jbtn'+(state.favView?' active':'')+
             '" onclick="toggleFavView()">&#9733; Favorites<span class="ct">'+
             favCount+'</span></button>';
