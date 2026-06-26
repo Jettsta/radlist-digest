@@ -746,11 +746,22 @@ def render_html(sections, generated, videos=None, topics=None, build_log=None):
       return a.iso > cut;
     }
     function markReviewed(journal){
-      const today = new Date().toISOString().slice(0,10);
-      if(journal) reviewed[journal] = today;
-      else {
-        // global: stamp global AND clear per-journal overrides so all reset together
-        reviewed = {'__global__': today};
+      // Stamp the cutoff at the NEWEST article's date (not today) so post-dated
+      // cover dates (e.g. Elsevier issues dated months ahead) are also marked seen.
+      function maxIso(filterJournal){
+        let mx = '';
+        DATA.articles.forEach(a=>{
+          if(filterJournal && a.journal!==filterJournal) return;
+          if(a.iso > mx) mx = a.iso;
+        });
+        return mx;
+      }
+      if(journal){
+        const mx = maxIso(journal);
+        if(mx) reviewed[journal] = mx;
+      } else {
+        const mx = maxIso(null);
+        reviewed = mx ? {'__global__': mx} : {};
       }
       Store.save('radlit_reviewed', reviewed);
       refresh();
