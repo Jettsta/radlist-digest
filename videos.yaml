@@ -10,11 +10,15 @@
 
 lookback_days: 366
 max_videos_per_channel: 200
-max_classifications_per_run: 8   # all current videos in one clean run; cache makes it a one-time cost. Free tier: 20 req/day, 5 req/min.
+max_classifications_per_run: 15  # under the 20/day Gemini free-tier limit. With 3 channels there may be many new videos; the cache means uncategorized ones retry next run, so it catches up over a few runs. Already-classified videos are reused (0 cost).
 
 channels:
   - handle: "sureshmukherji359"   # https://www.youtube.com/@sureshmukherji359
     name: "Suresh Mukherji"
+  - handle: "ashnrmember1229"     # https://www.youtube.com/@ashnrmember1229
+    name: "ASHNR Member"
+  - handle: "nakoontzmd"          # https://www.youtube.com/@nakoontzmd
+    name: "Nakoontz MD"
 
 topics:
   - "Head & Neck"

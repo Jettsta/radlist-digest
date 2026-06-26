@@ -1,14 +1,23 @@
 name: Monthly RadLit Digest
 
-# Runs automatically at 06:00 UTC on the 1st of each month.
-# You can also trigger it by hand from the Actions tab (the button below).
+# SCHEDULE:
+# Currently set to DAILY (06:00 UTC) to catch up classifying the newly-added
+# YouTube channels — only a batch of videos can be classified per day due to the
+# Gemini free-tier limit (~20 requests/day), and the cache means each run picks up
+# where the last left off.
+#
+# >>> ONCE THE VIDEOS ARE ALL CLASSIFIED <<<
+# (Build diagnostics will say "0 new, N reused from cache"), switch back to
+# MONTHLY to save GitHub Actions minutes: comment out the daily line below and
+# uncomment the monthly line.
 on:
   schedule:
-    - cron: "0 6 1 * *"
+    - cron: "0 6 * * *"      # DAILY at 06:00 UTC  (catch-up mode)
+    # - cron: "0 6 1 * *"    # MONTHLY on the 1st at 06:00 UTC  (normal mode)
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -32,6 +41,16 @@ jobs:
           CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python digest.py
+
+      - name: Save video classification cache
+        run: |
+          if [ -f video_cache.json ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add video_cache.json
+            git commit -m "Update video classification cache [skip ci]" || echo "No cache changes to commit"
+            git push || echo "Nothing to push"
+          fi
 
       - name: Prepare site
         run: |
